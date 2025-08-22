@@ -231,8 +231,12 @@ Driver = {
       -- TSS7254E  -- Access not available through this facility
       stdnse.verbose("Valid CICS Transaction ID [Abbend or ID Disabled]: %s", string.upper(pass))
       if nmap.verbosity() > 3 then
-        if path ~= nil then
-          local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
+        if path ~= nil then        
+          if current_region == '' then 
+            local filename = path .. string.upper(pass) .. ".txt"
+          else
+            local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
+          end
           stdnse.verbose(2,"Writting screen to: %s", filename)
           status, err = save_screens(filename, self.tn3270:get_screen())
           if not status then
@@ -257,7 +261,11 @@ Driver = {
     else
       stdnse.verbose("Valid CICS Transaction ID: %s", string.upper(pass))
       if path ~= nil then
-        local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
+        if current_region == '' then 
+          local filename = path .. string.upper(pass) .. ".txt"
+        else
+          local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
+        end
         stdnse.verbose(2,"Writting screen to: %s", filename)
         status, err = save_screens(filename, self.tn3270:get_screen())
         if not status then
@@ -469,7 +477,7 @@ action = function(host, port)
     if cicstst then
       local title = 'CICS Transaction IDs ' .. commands
       if not(username == nil and password == nil) then title = 'CICS Transaction IDs for User: '.. username end
-      local options = { key1 = commands, key2 = path, user = username, pass = password }
+      local options = { key1 = commands, key2 = path, user = username, pass = password, region = '' }
       stdnse.debug("Starting CICS Transaction ID Enumeration")
       if path ~= nil then stdnse.verbose(2,"Saving Screenshots to: %s", path) end
       local engine = brute.Engine:new(Driver, host, port, options)
