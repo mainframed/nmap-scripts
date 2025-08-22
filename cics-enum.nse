@@ -27,6 +27,8 @@ found for CICS transaction IDs.
 --  Defaults to the list of CICS transactions from IBM.
 -- @args cics-enum.commands Commands in a semi-colon separated list needed
 --  to access CICS. Defaults to <code>CICS</code>.
+-- @args cics-enum.regions_file Path to file containing CICS region names (one per line).
+--  When specified, overrides cics-enum.commands and uses "logon applid(<region>)" for each region.
 -- @args cics-enum.path Folder used to store valid transaction id 'screenshots'
 --  Defaults to <code>None</code> and doesn't store anything.
 -- @args cics-enum.user Username to use for authenticated enumeration
@@ -36,28 +38,38 @@ found for CICS transaction IDs.
 -- nmap --script=cics-enum -p 23 <targets>
 --
 -- nmap --script=cics-enum --script-args=idlist=default_cics.txt,
--- cics-enum.command="exit;logon applid(cics42)",
+-- cics-enum.commands="exit;logon applid(cics42)",
 -- cics-enum.path="/home/dade/screenshots/",cics-enum.noSSL=true -p 23 <targets>
+--
+-- nmap --script=cics-enum --script-args=cics-enum.regions_file=regions.txt,
+-- cics-enum.path="/home/dade/screenshots/" -p 23 <targets>
 --
 -- @output
 -- PORT   STATE SERVICE
 -- 23/tcp open  tn3270
 -- | cics-enum:
--- |   Accounts:
--- |     CBAM: Valid - CICS Transaction ID
--- |     CETR: Valid - CICS Transaction ID
--- |     CEST: Valid - CICS Transaction ID
--- |     CMSG: Valid - CICS Transaction ID
--- |     CEDA: Valid - CICS Transaction ID
--- |     CEDF: Potentially Valid - CICS Transaction ID
--- |     DSNC: Valid - CICS Transaction ID
--- |_  Statistics: Performed 31 guesses in 114 seconds, average tps: 0
+-- |   Region: CICS01:
+-- |     CBAM
+-- |     CETR
+-- |     CEST
+-- |     CMSG
+-- |     CEDA
+-- |     CEDF - ABEND
+-- |     CESN - Requires Auth
+-- |     DSNC - Blank Screen
+-- |   Region: CICS02:
+-- |     CBAD
+-- |     CESG
+-- |     CEDK - Access Denied
+-- |_    CYYY
 --
 -- @changelog
 -- 2015-07-04 - v0.1 - created by Soldier of Fortran
 -- 2015-11-14 - v0.2 - rewrote iterator
 -- 2017-01-22 - v0.3 - added authenticated CICS ID enumeration
 -- 2019-02-01 - v0.4 - Removed TN3270E support (breaks location)
+-- 2025-08-22 - v0.5 - Added region-based enumeration support with verbose status reporting
+-- 2025-08-22 - v0.5 - Added default transactions up to CICS TS 6.3
 --
 -- @author Philip Young
 -- @copyright Same as Nmap--See https://nmap.org/book/man-legal.html
@@ -111,6 +123,7 @@ Driver = {
   login = function (self, user, pass) -- pass is actually the CICS transaction we want to try
     local commands = self.options['key1']
     local path = self.options['key2']
+    local current_region = self.options['region']
     local cics_user = self.options['user']
     local cics_pass = self.options['pass']
     local timeout = 300
@@ -198,7 +211,9 @@ Driver = {
       -- but it didn't send a screen update so you should check by hand.
       -- We're not dumping this screen to disk because it's blank.
       return true, creds.Account:new("CICS ID [blank screen]", string.upper(pass), creds.State.VALID)
-    elseif self.tn3270:find('Unauthorized') or self.tn3270:find('DFHAC2002') then
+    elseif self.tn3270:find('Unauthorized') or 
+           self.tn3270:find('DFHAC2002') or 
+           self.tn3270:find('ACFAE904 Signon is required') then
       -- this is a VALID cics transaction but you must be authenticated to used it
       -- This will be the same screen for each so we dont bother saving it either
       stdnse.verbose("Valid CICS Transaction ID [requires auth]: %s", string.upper(pass))
@@ -217,10 +232,11 @@ Driver = {
       stdnse.verbose("Valid CICS Transaction ID [Abbend or ID Disabled]: %s", string.upper(pass))
       if nmap.verbosity() > 3 then
         if path ~= nil then
-          stdnse.verbose(2,"Writting screen to: %s", path..string.upper(pass)..".txt")
-          status, err = save_screens(path..string.upper(pass)..".txt",self.tn3270:get_screen())
+          local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
+          stdnse.verbose(2,"Writting screen to: %s", filename)
+          status, err = save_screens(filename, self.tn3270:get_screen())
           if not status then
-            stdnse.verbose(2,"Failed writting screen to: %s", path..string.upper(pass)..".txt")
+            stdnse.verbose(2,"Failed writting screen to: %s", filename)
           end
         end
         return true, creds.Account:new("CICS ID [Abbend]", string.upper(pass), creds.State.VALID)
@@ -241,10 +257,11 @@ Driver = {
     else
       stdnse.verbose("Valid CICS Transaction ID: %s", string.upper(pass))
       if path ~= nil then
-        stdnse.verbose(2,"Writting screen to: %s", path..string.upper(pass)..".txt")
-        status, err = save_screens(path..string.upper(pass)..".txt",self.tn3270:get_screen())
+        local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
+        stdnse.verbose(2,"Writting screen to: %s", filename)
+        status, err = save_screens(filename, self.tn3270:get_screen())
         if not status then
-          stdnse.verbose(2,"Failed writting screen to: %s", path..string.upper(pass)..".txt")
+          stdnse.verbose(2,"Failed writting screen to: %s", filename)
         end
       end
       return true, creds.Account:new("CICS ID", string.upper(pass), creds.State.VALID)
@@ -297,7 +314,7 @@ local function cics_test( host, port, commands, user, pass )
     -- some systems will just kick you off others are slow in responding
     -- this loop continues to try getting out of CICS 6 times. If it can't
     -- then we probably weren't in CICS to begin with.
-    if tn:find("Signon") then
+    if tn:find("Signon") or tn:find("SIGNON") then
       stdnse.debug(2,"Found 'Signon' sending PF3")
       tn:send_pf(3)
       tn:get_all_data()
@@ -320,7 +337,7 @@ local function cics_test( host, port, commands, user, pass )
   end
   tn:get_screen_debug(2)
 
-  if tn:find('off is complete.') then
+  if tn:find('off is complete.') or tn:find('ACFAE130') or tn:find('ACFAE136') then
       cics = true
   end
 
@@ -377,32 +394,45 @@ action = function(host, port)
   local cics_id_file = stdnse.get_script_args("idlist")
   local path = stdnse.get_script_args(SCRIPT_NAME .. '.path') -- Folder for screenshots
   local commands = stdnse.get_script_args(SCRIPT_NAME .. '.commands') or 'cics'-- VTAM commands/macros to get to CICS
+  local regions_file = stdnse.get_script_args(SCRIPT_NAME .. '.regions_file') -- File containing CICS regions
   local username = stdnse.get_script_args(SCRIPT_NAME .. '.user') or nil
   local password = stdnse.get_script_args(SCRIPT_NAME .. '.pass') or nil
-  local cics_ids = {"CADP", "CATA", "CATD", "CATR", "CBAM", "CCIN", "CCRL", "CDBC", "CDBD",
-    "CDBF", "CDBI", "CDBM", "CDBN", "CDBO", "CDBQ", "CDBT", "CDFS", "CDST",
-    "CDTS", "CEBR", "CEBT", "CECI", "CECS", "CEDA", "CEDB", "CEDC", "CEDF",
-    "CEDX", "CEGN", "CEHP", "CEHS", "CEKL", "CEMN", "CEMT", "CEOT", "CEPD",
-    "CEPF", "CEPH", "CEPM", "CEPQ", "CEPS", "CEPT", "CESC", "CESD", "CESF",
-    "CESL", "CESN", "CEST", "CETR", "CEX2", "CFCL", "CFCR", "CFOR", "CFQR",
-    "CFQS", "CFTL", "CFTS", "CGRP", "CHLP", "CIDP", "CIEP", "CIND", "CIS1",
-    "CIS4", "CISB", "CISC", "CISD", "CISE", "CISM", "CISP", "CISQ", "CISR",
-    "CISS", "CIST", "CISU", "CISX", "CITS", "CJLR", "CJSA", "CJSL", "CJSR",
-    "CJTR", "CKAM", "CKBC", "CKBM", "CKBP", "CKBR", "CKCN", "CKDL", "CKDP",
-    "CKQC", "CKRS", "CKRT", "CKSD", "CKSQ", "CKTI", "CLDM", "CLQ2", "CLR1",
-    "CLR2", "CLS1", "CLS2", "CLS3", "CLS4", "CMAC", "CMPX", "CMSG", "CMTS",
-    "COVR", "CPCT", "CPIA", "CPIH", "CPIL", "CPIQ", "CPIR", "CPIS", "CPLT",
-    "CPMI", "CPSS", "CQPI", "CQPO", "CQRY", "CRLR", "CRMD", "CRMF", "CRPA",
-    "CRPC", "CRPM", "CRSQ", "CRSR", "CRST", "CRSY", "CRTE", "CRTP", "CRTX",
-    "CSAC", "CSCY", "CSFE", "CSFR", "CSFU", "CSGM", "CSHA", "CSHQ", "CSHR",
-    "CSKP", "CSMI", "CSM1", "CSM2", "CSM3", "CSM5", "CSNC", "CSNE", "CSOL",
-    "CSPG", "CSPK", "CSPP", "CSPQ", "CSPS", "CSQC", "CSRK", "CSRS", "CSSF",
-    "CSSY", "CSTE", "CSTP", "CSXM", "CSZI", "CTIN", "CTSD", "CVMI", "CWBA",
-    "CWBG", "CWTO", "CWWU", "CWXN", "CWXU", "CW2A", "CXCU", "CXRE", "CXRT",
-    "DSNC"} -- Default CICS from https://www-01.ibm.com/support/knowledgecenter/SSGMCP_5.2.0/com.ibm.cics.ts.systemprogramming.doc/topics/dfha726.html
+  local cics_ids = {'CADP', 'CATA', 'CATD', 'CATR', 'CBAM', 'CCIN', 'CCRL', 'CDBC', 
+    'CDBD', 'CDBE', 'CDBF', 'CDBI', 'CDBM', 'CDBO', 'CDBP', 'CDBQ', 
+    'CDBT', 'CDFS', 'CDTS', 'CEBR', 'CECI', 'CECS', 'CEDA', 'CEDB', 
+    'CEDC', 'CEDF', 'CEDG', 'CEDX', 'CEDY', 'CEGN', 'CEHP', 'CEHS', 
+    'CEKL', 'CEMN', 'CEMT', 'CEOT', 'CEPD', 'CEPF', 'CEPH', 'CEPM', 
+    'CEPQ', 'CEPR', 'CEPS', 'CEPT', 'CESC', 'CESD', 'CESF', 'CESL', 
+    'CESN', 'CEST', 'CETR', 'CEX2', 'CFCL', 'CFCR', 'CFCT', 'CFOR', 
+    'CFQR', 'CFQS', 'CFTL', 'CFTS', 'CGRP', 'CHCK', 'CHLP', 'CIDP', 
+    'CIEP', 'CIND', 'CIS1', 'CIS4', 'CISB', 'CISC', 'CISD', 'CISE', 
+    'CISM', 'CISP', 'CISQ', 'CISR', 'CISS', 'CIST', 'CISU', 'CISX', 
+    'CITS', 'CJLR', 'CJSA', 'CJSL', 'CJSP', 'CJSR', 'CJSS', 'CJSU', 
+    'CJTR', 'CJXA', 'CKAM', 'CKBC', 'CKBM', 'CKBP', 'CKBR', 'CKCN', 
+    'CKDL', 'CKDP', 'CKQC', 'CKRS', 'CKRT', 'CKSD', 'CKSQ', 'CKTI', 
+    'CLDM', 'CLER', 'CLGR', 'CLQ2', 'CLR1', 'CLR2', 'CLS1', 'CLS2', 
+    'CLS3', 'CLS4', 'CMAC', 'CMNF', 'CMPE', 'CMPX', 'CMSG', 'CMTS', 
+    'CNJL', 'CNJW', 'COHT', 'COI0', 'COIE', 'COIR', 'COLM', 'CONA', 
+    'COND', 'CONH', 'CONL', 'CONM', 'CORM', 'COSC', 'COSH', 'COVC', 
+    'COVR', 'COWC', 'CPCT', 'CPIA', 'CPIH', 'CPIL', 'CPIQ', 'CPIR', 
+    'CPIS', 'CPIW', 'CPLT', 'CPMI', 'CPSS', 'CQPI', 'CQPO', 'CQRC', 
+    'CQRY', 'CRLR', 'CRMD', 'CRMF', 'CRPA', 'CRPC', 'CRPM', 'CRSQ', 
+    'CRSR', 'CRST', 'CRSY', 'CRTE', 'CRTP', 'CRTX', 'CSAC', 'CSCY', 
+    'CSFE', 'CSFR', 'CSFU', 'CSGM', 'CSHA', 'CSHQ', 'CSHR', 'CSKP', 
+    'CSM1', 'CSM2', 'CSM3', 'CSM5', 'CSMI', 'CSNC', 'CSNE', 'CSOL', 
+    'CSPG', 'CSPK', 'CSPP', 'CSPQ', 'CSPS', 'CSQC', 'CSRK', 'CSRS', 
+    'CSSF', 'CSSY', 'CSTE', 'CSTP', 'CSXM', 'CSZI', 'CTIN', 'CTSD', 
+    'CVMI', 'CW2A', 'CWBA', 'CWBG', 'CWDP', 'CWGQ', 'CWTO', 'CWWU', 
+    'CWXN', 'CWXU', 'CXCU', 'CXMT', 'CXRE', 'CXRT', 'CXSD', 'CXSM', 
+    'DSNC'} -- Default CICS from https://www.ibm.com/docs/en/cics-ts/6.x?topic=transactions-list-cics-63
+    
 
+  -- Add a trailing / to path if it doesn't exist:
+  if path and not path:match("/$") then
+    path = path .. "/"
+  end
+  -- Load custom transaction IDs if specified
   cics_id_file = ( (cics_id_file and nmap.fetchfile(cics_id_file)) or cics_id_file )
-
   if cics_id_file then
     for l in io.lines(cics_id_file) do
       if not l:match("#!comment:") then
@@ -410,21 +440,107 @@ action = function(host, port)
       end
     end
   end
-  local cicstst,msg = cics_test(host, port, commands, username, password)
-  if cicstst then
-    local title = 'CICS Transaction IDs'
-    if not(username == nil and password == nil) then title = 'CICS Transaction IDs for User: '.. username end
-    local options = { key1 = commands, key2 = path, user = username, pass = password }
-    stdnse.debug("Starting CICS Transaction ID Enumeration")
-    if path ~= nil then stdnse.verbose(2,"Saving Screenshots to: %s", path) end
-    local engine = brute.Engine:new(Driver, host, port, options)
-    engine.options.script_name = SCRIPT_NAME
-    engine:setPasswordIterator(unpwdb.filter_iterator(iter(cics_ids), valid_cics))
-    engine.options.passonly = true
-    engine.options:setTitle(title)
-    local status, result = engine:start()
-    return result
-  else
-    return msg
+
+  -- Load regions if specified
+  local regions = {}
+  if regions_file then
+    regions_file = ( (regions_file and nmap.fetchfile(regions_file)) or regions_file )
+    if regions_file then
+      for l in io.lines(regions_file) do
+        if not l:match("#!comment:") and l:match("%S") then -- ignore comments and empty lines
+          table.insert(regions, l:match("^%s*(.-)%s*$")) -- trim whitespace
+        end
+      end
+    else
+      return "Could not read regions file: " .. (stdnse.get_script_args(SCRIPT_NAME .. '.regions_file') or "")
+    end
   end
+
+  -- If regions file is specified but empty, return error
+  if regions_file and #regions == 0 then
+    return "Regions file is empty or contains no valid regions"
+  end
+
+  local final_results = stdnse.output_table()
+  
+  -- If no regions file specified, use original behavior
+  if not regions_file then
+    local cicstst,msg = cics_test(host, port, commands, username, password)
+    if cicstst then
+      local title = 'CICS Transaction IDs ' .. commands
+      if not(username == nil and password == nil) then title = 'CICS Transaction IDs for User: '.. username end
+      local options = { key1 = commands, key2 = path, user = username, pass = password }
+      stdnse.debug("Starting CICS Transaction ID Enumeration")
+      if path ~= nil then stdnse.verbose(2,"Saving Screenshots to: %s", path) end
+      local engine = brute.Engine:new(Driver, host, port, options)
+      engine.options.script_name = SCRIPT_NAME
+      engine:setPasswordIterator(unpwdb.filter_iterator(iter(cics_ids), valid_cics))
+      engine.options.passonly = true
+      engine.options:setTitle(title)
+      local status, result = engine:start()
+      return result
+    else
+      return msg
+    end
+  end
+
+  -- Region-based enumeration
+  for _, region in ipairs(regions) do
+    local region_command = "logon applid(" .. region .. ")"
+    stdnse.verbose("Testing region: %s with command: %s", region, region_command)
+    
+    local cicstst, msg = cics_test(host, port, region_command, username, password)
+    if cicstst then
+      local title = 'CICS Transaction IDs for Region: ' .. region .. ' (Command: ' .. region_command .. ')'
+      if not(username == nil and password == nil) then 
+        title = 'CICS Transaction IDs for Region: ' .. region .. ' User: ' .. username .. ' (Command: ' .. region_command .. ')'
+      end
+      
+      local options = { 
+        key1 = region_command, 
+        key2 = path, 
+        user = username, 
+        pass = password,
+        region = region 
+      }
+      
+      stdnse.debug("Starting CICS Transaction ID Enumeration for region: %s", region)
+      if path ~= nil then stdnse.verbose(2,"Saving Screenshots to: %s with region prefix: %s", path, region) end
+      
+      local engine = brute.Engine:new(Driver, host, port, options)
+      engine.options.script_name = SCRIPT_NAME
+      engine:setPasswordIterator(unpwdb.filter_iterator(iter(cics_ids), valid_cics))
+      engine.options.passonly = true
+      engine.options:setTitle(title)
+      
+      local status, result = engine:start()
+      
+      if status and result and result.accounts then
+        local region_results = {}
+        for _, account in ipairs(result.accounts) do
+          local tid = account.username or account.password
+          local state_desc = ""
+          if account.description then
+            if account.description:match("Abbend") then
+              state_desc = " - ABEND"
+            elseif account.description:match("blank screen") then
+              state_desc = " - Blank Screen"
+            elseif account.description:match("requires auth") then
+              state_desc = " - Requires Auth"
+            elseif account.description:match("Access Denied") then
+              state_desc = " - Access Denied"
+            end
+          end
+          table.insert(region_results, tid .. state_desc)
+        end
+        final_results["Region: " .. region] = region_results
+      else
+        final_results["Region: " .. region] = {msg or "Failed to enumerate transactions"}
+      end
+    else
+      final_results["Region: " .. region] = {msg or "Unable to access CICS region"}
+    end
+  end
+
+  return final_results
 end
