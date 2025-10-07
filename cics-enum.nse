@@ -145,6 +145,12 @@ Driver = {
       max_blank = max_blank + 1
     end
 
+    local count = 1
+    while not (self.tn3270:find('DFHCE3549') or self.tn3270:find('SIGNON/SIGNOFF')) and count < 6 do
+      self.tn3270:get_all_data(1000) 
+      count = count + 1
+    end
+
     while not self.tn3270:isClear() and loop < 10 do
       -- by this point we're at *some* CICS transaction
       -- so we send F3 to exit it
@@ -192,6 +198,11 @@ Driver = {
     self.tn3270:send_cursor(pass)
     self.tn3270:get_all_data()
 
+    freeze_maybe = stdnse.tohex(tostring(self.tn3270.buffer), {seperator = ":"}) -- look at this hacky shit
+    if freeze_maybe == "74:61:62:6c:65:3a:20:30:78:35:38:36:30:38:34:32:35:33:30" then
+      return false, brute.Error:new("PROG753")
+    end
+
     max_blank = 1
     while self.tn3270:isClear() and max_blank < 7 do
       stdnse.debug(2, "Screen is not clear for %s. Reading all data with a timeout of %s. Count %s",pass, timeout, max_blank)
@@ -231,11 +242,10 @@ Driver = {
       -- TSS7254E  -- Access not available through this facility
       stdnse.verbose("Valid CICS Transaction ID [Abbend or ID Disabled]: %s", string.upper(pass))
       if nmap.verbosity() > 3 then
-        if path ~= nil then        
+        if path ~= nil then  
+          local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"      
           if current_region == '' then 
-            local filename = path .. string.upper(pass) .. ".txt"
-          else
-            local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
+             filename = path .. string.upper(pass) .. ".txt"
           end
           stdnse.verbose(2,"Writting screen to: %s", filename)
           status, err = save_screens(filename, self.tn3270:get_screen())
@@ -261,10 +271,9 @@ Driver = {
     else
       stdnse.verbose("Valid CICS Transaction ID: %s", string.upper(pass))
       if path ~= nil then
+        local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
         if current_region == '' then 
           local filename = path .. string.upper(pass) .. ".txt"
-        else
-          local filename = path .. current_region .. "_" .. string.upper(pass) .. ".txt"
         end
         stdnse.verbose(2,"Writting screen to: %s", filename)
         status, err = save_screens(filename, self.tn3270:get_screen())
